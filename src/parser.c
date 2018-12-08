@@ -925,11 +925,6 @@ list *read_cfg(char *filename)
 
 void save_convolutional_weights_binary(layer l, FILE *fp)
 {
-#ifdef GPU
-    if(gpu_index >= 0){
-        pull_convolutional_layer(l);
-    }
-#endif
     binarize_weights(l.weights, l.n, l.c*l.size*l.size, l.binary_weights);
     int size = l.c*l.size*l.size;
     int i, j, k;
@@ -961,28 +956,30 @@ void save_convolutional_weights(layer l, FILE *fp)
         //save_convolutional_weights_binary(l, fp);
         //return;
     }
-#ifdef GPU
-    if(gpu_index >= 0){
-        pull_convolutional_layer(l);
-    }
-#endif
+
+    // 卷积权重的总个数
     int num = l.nweights;
+
+    // 一个卷积核有一个偏差; l.n 卷积核的个数
     fwrite(l.biases, sizeof(float), l.n, fp);
+
+    // 卷积的 BN 会单独计算每个 channel 的 scale 和 shift
+    // 同时需要使用 EMA 估计样本的均值和方差
     if (l.batch_normalize){
+        // 为什么不保存 shift ? 
+        // 因为使用 BN 之后，就不再需要 l.biases ，所以作者使用 l.biases 保存 BN 后的 shift
+        // 而且两者的维数必定相同: 卷积层中就是卷积核的个数
         fwrite(l.scales, sizeof(float), l.n, fp);
         fwrite(l.rolling_mean, sizeof(float), l.n, fp);
         fwrite(l.rolling_variance, sizeof(float), l.n, fp);
     }
+
+    // 最后保存所有的卷积权重
     fwrite(l.weights, sizeof(float), num, fp);
 }
 
 void save_batchnorm_weights(layer l, FILE *fp)
 {
-#ifdef GPU
-    if(gpu_index >= 0){
-        pull_batchnorm_layer(l);
-    }
-#endif
     fwrite(l.scales, sizeof(float), l.c, fp);
     fwrite(l.rolling_mean, sizeof(float), l.c, fp);
     fwrite(l.rolling_variance, sizeof(float), l.c, fp);
@@ -990,11 +987,6 @@ void save_batchnorm_weights(layer l, FILE *fp)
 
 void save_connected_weights(layer l, FILE *fp)
 {
-#ifdef GPU
-    if(gpu_index >= 0){
-        pull_connected_layer(l);
-    }
-#endif
     fwrite(l.biases, sizeof(float), l.outputs, fp);
     fwrite(l.weights, sizeof(float), l.outputs*l.inputs, fp);
     if (l.batch_normalize){
@@ -1006,11 +998,6 @@ void save_connected_weights(layer l, FILE *fp)
 
 void save_weights_upto(network *net, char *filename, int cutoff)
 {
-#ifdef GPU
-    if(net->gpu_index >= 0){
-        cuda_set_device(net->gpu_index);
-    }
-#endif
     fprintf(stderr, "Saving weights to %s\n", filename);
     FILE *fp = fopen(filename, "wb");
     if(!fp) file_error(filename);
@@ -1018,15 +1005,21 @@ void save_weights_upto(network *net, char *filename, int cutoff)
     int major = 0;
     int minor = 2;
     int revision = 0;
+
+    // 版本号 020
     fwrite(&major, sizeof(int), 1, fp);
     fwrite(&minor, sizeof(int), 1, fp);
     fwrite(&revision, sizeof(int), 1, fp);
+
+    // 与训练样本个数相关的一个参数 TODO
     fwrite(net->seen, sizeof(size_t), 1, fp);
 
     int i;
     for(i = 0; i < net->n && i < cutoff; ++i){
         layer l = net->layers[i];
         if (l.dontsave) continue;
+
+        // 卷积和转置卷积
         if(l.type == CONVOLUTIONAL || l.type == DECONVOLUTIONAL){
             save_convolutional_weights(l, fp);
         } if(l.type == CONNECTED){
@@ -1207,21 +1200,11 @@ void load_convolutional_weights(layer l, FILE *fp)
         transpose_matrix(l.weights, l.c*l.size*l.size, l.n);
     }
     //if (l.binary) binarize_weights(l.weights, l.n, l.c*l.size*l.size, l.weights);
-#ifdef GPU
-    if(gpu_index >= 0){
-        push_convolutional_layer(l);
-    }
-#endif
 }
 
 
 void load_weights_upto(network *net, char *filename, int start, int cutoff)
 {
-#ifdef GPU
-    if(net->gpu_index >= 0){
-        cuda_set_device(net->gpu_index);
-    }
-#endif
     fprintf(stderr, "Loading weights from %s...", filename);
     fflush(stdout);
     FILE *fp = fopen(filename, "rb");
@@ -1294,11 +1277,6 @@ void load_weights_upto(network *net, char *filename, int start, int cutoff)
             int size = l.size*l.size*l.c*l.n*locations;
             fread(l.biases, sizeof(float), l.outputs, fp);
             fread(l.weights, sizeof(float), size, fp);
-#ifdef GPU
-            if(gpu_index >= 0){
-                push_local_layer(l);
-            }
-#endif
         }
     }
     fprintf(stderr, "Done!\n");

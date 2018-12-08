@@ -144,6 +144,7 @@ void gradient_array(const float *x, const int n, const ACTIVATION a, float *delt
 {
     int i;
     for(i = 0; i < n; ++i){
+        // 逐元素求导
         delta[i] *= gradient(x[i], a);
     }
 } 

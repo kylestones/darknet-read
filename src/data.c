@@ -1459,9 +1459,17 @@ void get_random_batch(data d, int n, float *X, float *y)
 void get_next_batch(data d, int n, int offset, float *X, float *y)
 {
     int j;
+
+    // n is batch size
     for(j = 0; j < n; ++j){
+
+        // offset 是已经使用过的 batch
         int index = offset + j;
+
+        // image pixel value
         memcpy(X+j*d.X.cols, d.X.vals[index], d.X.cols*sizeof(float));
+
+        // annotation
         if(y) memcpy(y+j*d.y.cols, d.y.vals[index], d.y.cols*sizeof(float));
     }
 }

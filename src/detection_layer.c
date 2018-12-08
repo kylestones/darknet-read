@@ -19,27 +19,28 @@ detection_layer make_detection_layer(int batch, int inputs, int n, int side, int
     l.n = n;
     l.batch = batch;
     l.inputs = inputs;
-    l.classes = classes;
-    l.coords = coords;
+    l.classes = classes; // 类别数
+    l.coords = coords; // 这个不是固定为 4 吗? TODO
     l.rescore = rescore;
-    l.side = side;
+    l.side = side; // 分成的 grid 的个数
     l.w = side;
     l.h = side;
     assert(side*side*((1 + l.coords)*l.n + l.classes) == inputs);
+    
+    // cost
     l.cost = calloc(1, sizeof(float));
+
     l.outputs = l.inputs;
+
+    // 7*7*(1+4+c) TODO 没有 anchor ？ 不用乘以 batch ？
     l.truths = l.side*l.side*(1+l.coords+l.classes);
+
+    // output
     l.output = calloc(batch*l.outputs, sizeof(float));
     l.delta = calloc(batch*l.outputs, sizeof(float));
 
     l.forward = forward_detection_layer;
     l.backward = backward_detection_layer;
-#ifdef GPU
-    l.forward_gpu = forward_detection_layer_gpu;
-    l.backward_gpu = backward_detection_layer_gpu;
-    l.output_gpu = cuda_make_array(l.output, batch*l.outputs);
-    l.delta_gpu = cuda_make_array(l.delta, batch*l.outputs);
-#endif
 
     fprintf(stderr, "Detection Layer\n");
     srand(0);
@@ -49,11 +50,16 @@ detection_layer make_detection_layer(int batch, int inputs, int n, int side, int
 
 void forward_detection_layer(const detection_layer l, network net)
 {
+    // grid 总个数
     int locations = l.side*l.side;
     int i,j;
+
+    // 将 net.input 拷贝到 l.output ；就是上一层网络的输出
+    // net.input 随着网络的传播而不断变为某一次的输出
     memcpy(l.output, net.input, l.outputs*l.batch*sizeof(float));
+
     //if(l.reorg) reorg(l.output, l.w*l.h, size*l.n, l.batch, 1);
-    int b;
+    int b; // batch
     if (l.softmax){
         for(b = 0; b < l.batch; ++b){
             int index = b*l.inputs;
@@ -64,6 +70,7 @@ void forward_detection_layer(const detection_layer l, network net)
             }
         }
     }
+
     if(net.train){
         float avg_iou = 0;
         float avg_cat = 0;
@@ -74,11 +81,22 @@ void forward_detection_layer(const detection_layer l, network net)
         *(l.cost) = 0;
         int size = l.inputs * l.batch;
         memset(l.delta, 0, size * sizeof(float));
+
+        // 逐 batch
         for (b = 0; b < l.batch; ++b){
+
+            // 输入的索引
             int index = b*l.inputs;
+
+            // 逐 grid
             for (i = 0; i < locations; ++i) {
+
+                // grid 在 batch 中的索引
                 int truth_index = (b*locations + i)*(1+l.coords+l.classes);
+                // 样本的 annotation
                 int is_obj = net.truth[truth_index];
+
+                // 
                 for (j = 0; j < l.n; ++j) {
                     int p_index = index + locations*l.classes + i*l.n + j;
                     l.delta[p_index] = l.noobject_scale*(0 - l.output[p_index]);
@@ -94,6 +112,7 @@ void forward_detection_layer(const detection_layer l, network net)
                     continue;
                 }
 
+                // 类别
                 int class_index = index + i*l.classes;
                 for(j = 0; j < l.classes; ++j) {
                     l.delta[class_index+j] = l.class_scale * (net.truth[truth_index+1+j] - l.output[class_index+j]);
@@ -119,6 +138,7 @@ void forward_detection_layer(const detection_layer l, network net)
 
                     float iou  = box_iou(out, truth);
                     //iou = 0;
+                    // 均方误差
                     float rmse = box_rmse(out, truth);
                     if(best_iou > 0 || iou > 0){
                         if(iou > best_iou){
@@ -154,6 +174,8 @@ void forward_detection_layer(const detection_layer l, network net)
                     out.w = out.w*out.w;
                     out.h = out.h*out.h;
                 }
+
+                // 计算两个 box 的 IoU
                 float iou  = box_iou(out, truth);
 
                 //printf("%d,", best_index);
@@ -214,11 +236,12 @@ void forward_detection_layer(const detection_layer l, network net)
 
         printf("Detection Avg IOU: %f, Pos Cat: %f, All Cat: %f, Pos Obj: %f, Any Obj: %f, count: %d\n", avg_iou/count, avg_cat/count, avg_allcat/(count*l.classes), avg_obj/count, avg_anyobj/(l.batch*locations*l.n), count);
         //if(l.reorg) reorg(l.delta, l.w*l.h, size*l.n, l.batch, 0);
-    }
+    } // end for if(net.train)
 }
 
 void backward_detection_layer(const detection_layer l, network net)
 {
+    // 求解 net.delta += l.delta
     axpy_cpu(l.batch*l.inputs, 1, l.delta, 1, net.delta, 1);
 }
 
@@ -251,25 +274,4 @@ void get_detection_detections(layer l, int w, int h, float thresh, detection *de
     }
 }
 
-#ifdef GPU
-
-void forward_detection_layer_gpu(const detection_layer l, network net)
-{
-    if(!net.train){
-        copy_gpu(l.batch*l.inputs, net.input_gpu, 1, l.output_gpu, 1);
-        return;
-    }
-
-    cuda_pull_array(net.input_gpu, net.input, l.batch*l.inputs);
-    forward_detection_layer(l, net);
-    cuda_push_array(l.output_gpu, l.output, l.batch*l.outputs);
-    cuda_push_array(l.delta_gpu, l.delta, l.batch*l.inputs);
-}
-
-void backward_detection_layer_gpu(detection_layer l, network net)
-{
-    axpy_gpu(l.batch*l.inputs, 1, l.delta_gpu, 1, net.delta_gpu, 1);
-    //copy_gpu(l.batch*l.inputs, l.delta_gpu, 1, net.delta_gpu, 1);
-}
-#endif
 

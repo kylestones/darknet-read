@@ -95,24 +95,35 @@ void mean_cpu(float *x, int batch, int filters, int spatial, float *mean)
 {
     float scale = 1./(batch * spatial);
     int i,j,k;
+
+    // 逐 channel 计算
     for(i = 0; i < filters; ++i){
         mean[i] = 0;
+
+        // batch 内所有相同 channel 的 feature map 求和
         for(j = 0; j < batch; ++j){
             for(k = 0; k < spatial; ++k){
                 int index = j*filters*spatial + i*spatial + k;
                 mean[i] += x[index];
             }
         }
+
+        // 除以总数求平均
         mean[i] *= scale;
     }
 }
 
 void variance_cpu(float *x, float *mean, int batch, int filters, int spatial, float *variance)
 {
+    // 为什么最后要 -1 TODO
     float scale = 1./(batch * spatial - 1);
     int i,j,k;
+
+    // 逐 channel 计算
     for(i = 0; i < filters; ++i){
         variance[i] = 0;
+
+        // batch 内所有相同 channel 的 feature map 求和
         for(j = 0; j < batch; ++j){
             for(k = 0; k < spatial; ++k){
                 int index = j*filters*spatial + i*spatial + k;
@@ -144,6 +155,7 @@ void l2normalize_cpu(float *x, float *dx, int batch, int filters, int spatial)
 }
 
 
+// 归一化
 void normalize_cpu(float *x, float *mean, float *variance, int batch, int filters, int spatial)
 {
     int b, f, i;

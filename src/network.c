@@ -187,37 +187,40 @@ network *make_network(int n)
 
 void forward_network(network *netp)
 {
-#ifdef GPU
-    if(netp->gpu_index >= 0){
-        forward_network_gpu(netp);   
-        return;
-    }
-#endif
     network net = *netp;
     int i;
+
+    // 逐层传播
     for(i = 0; i < net.n; ++i){
         net.index = i;
         layer l = net.layers[i];
+
+        // l.delta 清零
         if(l.delta){
             fill_cpu(l.outputs * l.batch, 0, l.delta, 1);
         }
+
         l.forward(l, net);
+
+
+        // 前向传播和反向传播时， layer.input 和 layer.output 始终保持不变，
+        // 用 net.input 指针来指向某层网络需要的输入，
+        
+        // 前一层网络的输出作为后一次网络的输入
         net.input = l.output;
+
+        // detection_layer TODO
         if(l.truth) {
             net.truth = l.output;
         }
     }
+
+    // 
     calc_network_cost(netp);
 }
 
 void update_network(network *netp)
 {
-#ifdef GPU
-    if(netp->gpu_index >= 0){
-        update_network_gpu(netp);   
-        return;
-    }
-#endif
     network net = *netp;
     int i;
     update_args a = {0};
@@ -262,25 +265,29 @@ int get_predicted_class_network(network *net)
 
 void backward_network(network *netp)
 {
-#ifdef GPU
-    if(netp->gpu_index >= 0){
-        backward_network_gpu(netp);   
-        return;
-    }
-#endif
     network net = *netp;
     int i;
     network orig = net;
+
+    // 反向传播 ；从 n-1 开始？ TODO
     for(i = net.n-1; i >= 0; --i){
+
+        // 取 l 层
         layer l = net.layers[i];
+
         if(l.stopbackward) break;
+
+        // i == 0 表示输入层 ？ TODO
         if(i == 0){
             net = orig;
         }else{
+
+            // 将 net 的输入指向前一层的输出
             layer prev = net.layers[i-1];
             net.input = prev.output;
             net.delta = prev.delta;
         }
+
         net.index = i;
         l.backward(l, net);
     }
@@ -315,12 +322,20 @@ float train_network(network *net, data d)
 {
     assert(d.X.rows % net->batch == 0);
     int batch = net->batch;
+
+    // d.X 是一个二维数组
+    // 这里得到的是训练样本需要分成 batch 的个数？
     int n = d.X.rows / batch;
 
     int i;
     float sum = 0;
     for(i = 0; i < n; ++i){
+
+        // 获取第 i 个 batch 的训练样本
+        // 样本拷贝到 net->input
+        // annotation 拷贝到 net->truth
         get_next_batch(d, batch, i*batch, net->input, net->truth);
+
         float err = train_network_datum(net);
         sum += err;
     }
@@ -342,25 +357,11 @@ void set_batch_network(network *net, int b)
     int i;
     for(i = 0; i < net->n; ++i){
         net->layers[i].batch = b;
-#ifdef CUDNN
-        if(net->layers[i].type == CONVOLUTIONAL){
-            cudnn_convolutional_setup(net->layers + i);
-        }
-        if(net->layers[i].type == DECONVOLUTIONAL){
-            layer *l = net->layers + i;
-            cudnnSetTensor4dDescriptor(l->dstTensorDesc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, 1, l->out_c, l->out_h, l->out_w);
-            cudnnSetTensor4dDescriptor(l->normTensorDesc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, 1, l->out_c, 1, 1); 
-        }
-#endif
     }
 }
 
 int resize_network(network *net, int w, int h)
 {
-#ifdef GPU
-    cuda_set_device(net->gpu_index);
-    cuda_free(net->workspace);
-#endif
     int i;
     //if(w == net->w && h == net->h) return 0;
     net->w = w;
@@ -416,23 +417,8 @@ int resize_network(network *net, int w, int h)
     free(net->truth);
     net->input = calloc(net->inputs*net->batch, sizeof(float));
     net->truth = calloc(net->truths*net->batch, sizeof(float));
-#ifdef GPU
-    if(gpu_index >= 0){
-        cuda_free(net->input_gpu);
-        cuda_free(net->truth_gpu);
-        net->input_gpu = cuda_make_array(net->input, net->inputs*net->batch);
-        net->truth_gpu = cuda_make_array(net->truth, net->truths*net->batch);
-        if(workspace_size){
-            net->workspace = cuda_make_array(0, (workspace_size-1)/sizeof(float)+1);
-        }
-    }else {
-        free(net->workspace);
-        net->workspace = calloc(1, workspace_size);
-    }
-#else
     free(net->workspace);
     net->workspace = calloc(1, workspace_size);
-#endif
     //fprintf(stderr, " Done!\n");
     return 0;
 }

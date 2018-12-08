@@ -18,11 +18,6 @@ void swap_binary(convolutional_layer *l)
     l->weights = l->binary_weights;
     l->binary_weights = swap;
 
-#ifdef GPU
-    swap = l->weights_gpu;
-    l->weights_gpu = l->binary_weights_gpu;
-    l->binary_weights_gpu = swap;
-#endif
 }
 
 void binarize_weights(float *weights, int n, int size, float *binary)
@@ -84,95 +79,16 @@ image get_convolutional_delta(convolutional_layer l)
 }
 
 static size_t get_workspace_size(layer l){
-#ifdef CUDNN
-    if(gpu_index >= 0){
-        size_t most = 0;
-        size_t s = 0;
-        cudnnGetConvolutionForwardWorkspaceSize(cudnn_handle(),
-                l.srcTensorDesc,
-                l.weightDesc,
-                l.convDesc,
-                l.dstTensorDesc,
-                l.fw_algo,
-                &s);
-        if (s > most) most = s;
-        cudnnGetConvolutionBackwardFilterWorkspaceSize(cudnn_handle(),
-                l.srcTensorDesc,
-                l.ddstTensorDesc,
-                l.convDesc,
-                l.dweightDesc,
-                l.bf_algo,
-                &s);
-        if (s > most) most = s;
-        cudnnGetConvolutionBackwardDataWorkspaceSize(cudnn_handle(),
-                l.weightDesc,
-                l.ddstTensorDesc,
-                l.convDesc,
-                l.dsrcTensorDesc,
-                l.bd_algo,
-                &s);
-        if (s > most) most = s;
-        return most;
-    }
-#endif
     return (size_t)l.out_h*l.out_w*l.size*l.size*l.c/l.groups*sizeof(float);
 }
 
-#ifdef GPU
-#ifdef CUDNN
-void cudnn_convolutional_setup(layer *l)
-{
-    cudnnSetTensor4dDescriptor(l->dsrcTensorDesc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, l->batch, l->c, l->h, l->w); 
-    cudnnSetTensor4dDescriptor(l->ddstTensorDesc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, l->batch, l->out_c, l->out_h, l->out_w); 
 
-    cudnnSetTensor4dDescriptor(l->srcTensorDesc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, l->batch, l->c, l->h, l->w); 
-    cudnnSetTensor4dDescriptor(l->dstTensorDesc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, l->batch, l->out_c, l->out_h, l->out_w); 
-    cudnnSetTensor4dDescriptor(l->normTensorDesc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, 1, l->out_c, 1, 1); 
-
-    cudnnSetFilter4dDescriptor(l->dweightDesc, CUDNN_DATA_FLOAT, CUDNN_TENSOR_NCHW, l->n, l->c/l->groups, l->size, l->size); 
-    cudnnSetFilter4dDescriptor(l->weightDesc, CUDNN_DATA_FLOAT, CUDNN_TENSOR_NCHW, l->n, l->c/l->groups, l->size, l->size); 
-    #if CUDNN_MAJOR >= 6
-    cudnnSetConvolution2dDescriptor(l->convDesc, l->pad, l->pad, l->stride, l->stride, 1, 1, CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT);
-    #else
-    cudnnSetConvolution2dDescriptor(l->convDesc, l->pad, l->pad, l->stride, l->stride, 1, 1, CUDNN_CROSS_CORRELATION);
-    #endif
-
-    #if CUDNN_MAJOR >= 7
-    cudnnSetConvolutionGroupCount(l->convDesc, l->groups);
-    #else
-    if(l->groups > 1){
-        error("CUDNN < 7 doesn't support groups, please upgrade!");
-    }
-    #endif
-
-    cudnnGetConvolutionForwardAlgorithm(cudnn_handle(),
-            l->srcTensorDesc,
-            l->weightDesc,
-            l->convDesc,
-            l->dstTensorDesc,
-            CUDNN_CONVOLUTION_FWD_SPECIFY_WORKSPACE_LIMIT,
-            2000000000,
-            &l->fw_algo);
-    cudnnGetConvolutionBackwardDataAlgorithm(cudnn_handle(),
-            l->weightDesc,
-            l->ddstTensorDesc,
-            l->convDesc,
-            l->dsrcTensorDesc,
-            CUDNN_CONVOLUTION_BWD_DATA_SPECIFY_WORKSPACE_LIMIT,
-            2000000000,
-            &l->bd_algo);
-    cudnnGetConvolutionBackwardFilterAlgorithm(cudnn_handle(),
-            l->srcTensorDesc,
-            l->ddstTensorDesc,
-            l->convDesc,
-            l->dweightDesc,
-            CUDNN_CONVOLUTION_BWD_FILTER_SPECIFY_WORKSPACE_LIMIT,
-            2000000000,
-            &l->bf_algo);
-}
-#endif
-#endif
-
+// @param batch
+//        h
+//        w
+//        c      channel 个数
+//        n      卷积核个数 / 输出 channel 个数
+//        size   卷积核的大小
 convolutional_layer make_convolutional_layer(int batch, int h, int w, int c, int n, int groups, int size, int stride, int padding, ACTIVATION activation, int batch_normalize, int binary, int xnor, int adam)
 {
     int i;
@@ -192,12 +108,17 @@ convolutional_layer make_convolutional_layer(int batch, int h, int w, int c, int
     l.pad = padding;
     l.batch_normalize = batch_normalize;
 
+    // 卷积核参数的个数 : c/group * n * size * size
+    // l.c 是卷积层 channel 的个数
+    // l.n 是卷积核的个数，即输出的 channel 个数
     l.weights = calloc(c/groups*n*size*size, sizeof(float));
     l.weight_updates = calloc(c/groups*n*size*size, sizeof(float));
 
+    // 输出 channel 的个数
     l.biases = calloc(n, sizeof(float));
     l.bias_updates = calloc(n, sizeof(float));
 
+    // 为什么不先计算这个参数，然后以他为参数来申请内存？
     l.nweights = c/groups*n*size*size;
     l.nbiases = n;
 
@@ -206,6 +127,7 @@ convolutional_layer make_convolutional_layer(int batch, int h, int w, int c, int
     //printf("convscale %f\n", scale);
     //scale = .02;
     //for(i = 0; i < c*n*size*size; ++i) l.weights[i] = scale*rand_uniform(-1, 1);
+    // 随机初始化权重 方式 ？ TODO
     for(i = 0; i < l.nweights; ++i) l.weights[i] = scale*rand_normal();
     int out_w = convolutional_out_width(l);
     int out_h = convolutional_out_height(l);
@@ -216,6 +138,7 @@ convolutional_layer make_convolutional_layer(int batch, int h, int w, int c, int
     l.inputs = l.w * l.h * l.c;
 
     l.output = calloc(l.batch*l.outputs, sizeof(float));
+    // l.delta 总是与 l.output 维数相同
     l.delta  = calloc(l.batch*l.outputs, sizeof(float));
 
     l.forward = forward_convolutional_layer;
@@ -238,6 +161,7 @@ convolutional_layer make_convolutional_layer(int batch, int h, int w, int c, int
             l.scales[i] = 1;
         }
 
+        // 只有使用 BN 的时候才需要申请 mean 和 variance 的空间
         l.mean = calloc(n, sizeof(float));
         l.variance = calloc(n, sizeof(float));
 
@@ -246,6 +170,8 @@ convolutional_layer make_convolutional_layer(int batch, int h, int w, int c, int
 
         l.rolling_mean = calloc(n, sizeof(float));
         l.rolling_variance = calloc(n, sizeof(float));
+
+        // 输出
         l.x = calloc(l.batch*l.outputs, sizeof(float));
         l.x_norm = calloc(l.batch*l.outputs, sizeof(float));
     }
@@ -258,67 +184,6 @@ convolutional_layer make_convolutional_layer(int batch, int h, int w, int c, int
         l.scale_v = calloc(n, sizeof(float));
     }
 
-#ifdef GPU
-    l.forward_gpu = forward_convolutional_layer_gpu;
-    l.backward_gpu = backward_convolutional_layer_gpu;
-    l.update_gpu = update_convolutional_layer_gpu;
-
-    if(gpu_index >= 0){
-        if (adam) {
-            l.m_gpu = cuda_make_array(l.m, l.nweights);
-            l.v_gpu = cuda_make_array(l.v, l.nweights);
-            l.bias_m_gpu = cuda_make_array(l.bias_m, n);
-            l.bias_v_gpu = cuda_make_array(l.bias_v, n);
-            l.scale_m_gpu = cuda_make_array(l.scale_m, n);
-            l.scale_v_gpu = cuda_make_array(l.scale_v, n);
-        }
-
-        l.weights_gpu = cuda_make_array(l.weights, l.nweights);
-        l.weight_updates_gpu = cuda_make_array(l.weight_updates, l.nweights);
-
-        l.biases_gpu = cuda_make_array(l.biases, n);
-        l.bias_updates_gpu = cuda_make_array(l.bias_updates, n);
-
-        l.delta_gpu = cuda_make_array(l.delta, l.batch*out_h*out_w*n);
-        l.output_gpu = cuda_make_array(l.output, l.batch*out_h*out_w*n);
-
-        if(binary){
-            l.binary_weights_gpu = cuda_make_array(l.weights, l.nweights);
-        }
-        if(xnor){
-            l.binary_weights_gpu = cuda_make_array(l.weights, l.nweights);
-            l.binary_input_gpu = cuda_make_array(0, l.inputs*l.batch);
-        }
-
-        if(batch_normalize){
-            l.mean_gpu = cuda_make_array(l.mean, n);
-            l.variance_gpu = cuda_make_array(l.variance, n);
-
-            l.rolling_mean_gpu = cuda_make_array(l.mean, n);
-            l.rolling_variance_gpu = cuda_make_array(l.variance, n);
-
-            l.mean_delta_gpu = cuda_make_array(l.mean, n);
-            l.variance_delta_gpu = cuda_make_array(l.variance, n);
-
-            l.scales_gpu = cuda_make_array(l.scales, n);
-            l.scale_updates_gpu = cuda_make_array(l.scale_updates, n);
-
-            l.x_gpu = cuda_make_array(l.output, l.batch*out_h*out_w*n);
-            l.x_norm_gpu = cuda_make_array(l.output, l.batch*out_h*out_w*n);
-        }
-#ifdef CUDNN
-        cudnnCreateTensorDescriptor(&l.normTensorDesc);
-        cudnnCreateTensorDescriptor(&l.srcTensorDesc);
-        cudnnCreateTensorDescriptor(&l.dstTensorDesc);
-        cudnnCreateFilterDescriptor(&l.weightDesc);
-        cudnnCreateTensorDescriptor(&l.dsrcTensorDesc);
-        cudnnCreateTensorDescriptor(&l.ddstTensorDesc);
-        cudnnCreateFilterDescriptor(&l.dweightDesc);
-        cudnnCreateConvolutionDescriptor(&l.convDesc);
-        cudnn_convolutional_setup(&l);
-#endif
-    }
-#endif
     l.workspace_size = get_workspace_size(l);
     l.activation = activation;
 
@@ -387,24 +252,6 @@ void resize_convolutional_layer(convolutional_layer *l, int w, int h)
         l->x_norm  = realloc(l->x_norm, l->batch*l->outputs*sizeof(float));
     }
 
-#ifdef GPU
-    cuda_free(l->delta_gpu);
-    cuda_free(l->output_gpu);
-
-    l->delta_gpu =  cuda_make_array(l->delta,  l->batch*l->outputs);
-    l->output_gpu = cuda_make_array(l->output, l->batch*l->outputs);
-
-    if(l->batch_normalize){
-        cuda_free(l->x_gpu);
-        cuda_free(l->x_norm_gpu);
-
-        l->x_gpu = cuda_make_array(l->output, l->batch*l->outputs);
-        l->x_norm_gpu = cuda_make_array(l->output, l->batch*l->outputs);
-    }
-#ifdef CUDNN
-    cudnn_convolutional_setup(l);
-#endif
-#endif
     l->workspace_size = get_workspace_size(*l);
 }
 
@@ -432,20 +279,30 @@ void scale_bias(float *output, float *scales, int batch, int n, int size)
     }
 }
 
+// bias_updates 长度为 n ； delta 的长度是 batch*n*size
 void backward_bias(float *bias_updates, float *delta, int batch, int n, int size)
 {
     int i,b;
     for(b = 0; b < batch; ++b){
         for(i = 0; i < n; ++i){
+
+            // bias_updates[i] 应该是 batch 相同位置 delta 总和
+            // 这里是按着 delta 的索引顺序从前到后遍历
+            // size 为步长，表示输出 feature map 的 h*w
             bias_updates[i] += sum_array(delta+size*(i+b*n), size);
         }
     }
 }
 
+// 一个卷积层权重参数的个数为 (in-channels/groups*ksize*ksize*out-channels/groups)*groups
+// 总计为 in-channels*ksize*ksize*out-channels / groups ；
+// 即使用 group 可以将卷积参数的个数变为原来的 1/groups
+// 可以参照 make_convolutional_layer 函数中申请内存的地方
 void forward_convolutional_layer(convolutional_layer l, network net)
 {
     int i, j;
 
+    // l.output 清零
     fill_cpu(l.outputs*l.batch, 0, l.output, 1);
 
     if(l.xnor){
@@ -455,19 +312,36 @@ void forward_convolutional_layer(convolutional_layer l, network net)
         net.input = l.binary_input;
     }
 
+    // 输出 channel 的每个 group 内的 channel 的个数
+    // 即三维卷积核的个数
     int m = l.n/l.groups;
+    // 这里不会有无法整除的情况吧？？ TODO
+
+    // 每个卷积核的参数的个数
     int k = l.size*l.size*l.c/l.groups;
+
+    // 输出 channel 的 w 和 h ； n 表示输出 feature map 的 spatial size
     int n = l.out_w*l.out_h;
+
     for(i = 0; i < l.batch; ++i){
         for(j = 0; j < l.groups; ++j){
+
+            // 计算分组卷积权重的起始地址
             float *a = l.weights + j*l.nweights/l.groups;
+
             float *b = net.workspace;
+
+            // 输出
             float *c = l.output + (i*l.groups + j)*n*m;
+
+            // 输入
             float *im =  net.input + (i*l.groups + j)*l.c/l.groups*l.h*l.w;
 
+            // 1X1 卷积不需要变换
             if (l.size == 1) {
                 b = im;
             } else {
+                // 将输入 im 展开成矩阵 b
                 im2col_cpu(im, l.c/l.groups, l.h, l.w, l.size, l.stride, l.pad, b);
             }
             gemm(0,0,m,n,k,1,a,k,b,n,1,c,n);
@@ -477,10 +351,13 @@ void forward_convolutional_layer(convolutional_layer l, network net)
     if(l.batch_normalize){
         forward_batchnorm_layer(l, net);
     } else {
+        // 不使用 BN 的时候需要添加 bias
         add_bias(l.output, l.biases, l.batch, l.n, l.out_h*l.out_w);
     }
 
+    // 无论是否有 BN ，都是最后计算激活函数
     activate_array(l.output, l.outputs*l.batch, l.activation);
+
     if(l.binary || l.xnor) swap_binary(&l);
 }
 
@@ -489,13 +366,19 @@ void backward_convolutional_layer(convolutional_layer l, network net)
     int i, j;
     int m = l.n/l.groups;
     int n = l.size*l.size*l.c/l.groups;
-    int k = l.out_w*l.out_h;
+    int k = l.out_w*l.out_h; // 输出的 feature map spatial size
 
+    // l.delta *= activation'
     gradient_array(l.output, l.outputs*l.batch, l.activation, l.delta);
 
     if(l.batch_normalize){
         backward_batchnorm_layer(l, net);
     } else {
+
+        // 不用 BN 时，
+        // l.bias_updates 等于输出 channel 的个数；
+        // l.delta 等于输出 pixel 的个数；
+        // 所以更新 l.bias_updates 时，对 l.delta 的步长为 l.out_w*l.out_h
         backward_bias(l.bias_updates, l.delta, l.batch, l.n, k);
     }
 

@@ -135,10 +135,10 @@ struct layer{
     int truths;
     int h,w,c;
     int out_h, out_w, out_c;
-    int n;
+    int n; // 卷积核的个数
     int max_boxes;
     int groups;
-    int size;
+    int size; // kernel size
     int side;
     int stride;
     int reverse;
@@ -229,10 +229,10 @@ struct layer{
 
     float * binary_weights;
 
-    float * biases;
+    float * biases; // 卷积的 biases; 使用 BN 时，作为 BN 学的的两个参数之一 shift
     float * bias_updates;
 
-    float * scales;
+    float * scales; // BN 学的的两个参数之一 scale
     float * scale_updates;
 
     float * weights;
@@ -479,19 +479,13 @@ typedef struct network{
 
     float *input;
     float *truth;
-    float *delta;
+    float *delta; // 反向传播时，输出的导数；就是吴恩达讲解的 dA^[l]
     float *workspace;
     int train;
     int index;
     float *cost;
     float clip;
 
-#ifdef GPU
-    float *input_gpu;
-    float *truth_gpu;
-    float *delta_gpu;
-    float *output_gpu;
-#endif
 
 } network;
 
@@ -533,11 +527,12 @@ typedef struct matrix{
 
 typedef struct{
     int w, h;
-    matrix X;
-    matrix y;
+    matrix X; // 二维数组；包含一个 batch 内全部数据；用于存储 image pixel value
+    matrix y; // 存储 annotation
     int shallow;
+
     int *num_boxes;
-    box **boxes;
+    box **boxes; // x,y,x,h
 } data;
 
 typedef enum {
